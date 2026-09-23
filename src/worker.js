@@ -391,14 +391,15 @@ async function proxyRequest(request, workerUrl) {
   );
 
   /* -------------------------------------------------------
-     Request headers
+     Request headers (Universal & Automatic)
   ------------------------------------------------------- */
 
   const upstreamHeaders = new Headers();
 
-  /* Force Sun NXT Referer and Origin */
-  upstreamHeaders.set("Referer", "https://www.sunnxt.com/");
-  upstreamHeaders.set("Origin", "https://www.sunnxt.com");
+  /* Automatically derive Origin and Referer from the target URL's domain */
+  const targetOrigin = `${targetUrl.protocol}//${targetUrl.host}`;
+  upstreamHeaders.set("Origin", targetOrigin);
+  upstreamHeaders.set("Referer", targetOrigin + "/");
 
   /* Range */
   const range = request.headers.get("Range");
@@ -420,12 +421,13 @@ async function proxyRequest(request, workerUrl) {
     upstreamHeaders.set("Accept-Encoding", acceptEncoding);
   }
 
-  /* User-Agent */
+  /* User-Agent: Pass through client's browser user agent, or fallback */
   const userAgent = request.headers.get("User-Agent");
   if (userAgent) {
     upstreamHeaders.set("User-Agent", userAgent);
+  } else {
+    upstreamHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
   }
-
 
   /* -------------------------------------------------------
      Fetch upstream
