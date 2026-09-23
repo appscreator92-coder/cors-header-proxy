@@ -390,45 +390,51 @@ async function proxyRequest(request, workerUrl) {
     [...ALLOWED_HOSTS]
   );
 
-  /* -------------------------------------------------------
-     Request headers (Universal & Automatic)
+ /* -------------------------------------------------------
+     Request headers (Optimized to match working proxies)
   ------------------------------------------------------- */
 
   const upstreamHeaders = new Headers();
 
-  /* Automatically derive Origin and Referer from the target URL's domain */
+  /* 1. Intelligent Referer / Origin handling */
   const targetOrigin = `${targetUrl.protocol}//${targetUrl.host}`;
+  
+  // If you want to use the target's host as origin, but fallback or strip if needed:
   upstreamHeaders.set("Origin", targetOrigin);
-  upstreamHeaders.set("Referer", targetOrigin + "/");
+  
+  // For many streaming sites, they want the referer to look like it came from the main app or be clean:
+  const customReferer = request.headers.get("Referer");
+  if (customReferer) {
+    upstreamHeaders.set("Referer", customReferer);
+  } else {
+    upstreamHeaders.set("Referer", targetOrigin + "/");
+  }
 
-  /* Range */
+  /* 2. Range request support */
   const range = request.headers.get("Range");
   if (range) {
     upstreamHeaders.set("Range", range);
   }
 
-  /* Accept */
-  const accept = request.headers.get("Accept");
-  if (accept) {
-    upstreamHeaders.set("Accept", accept);
-  } else {
-    upstreamHeaders.set("Accept", "*/*");
-  }
-
-  /* Accept-Encoding */
+  /* 3. Accept headers */
+  upstreamHeaders.set("Accept", request.headers.get("Accept") || "*/*");
+  
   const acceptEncoding = request.headers.get("Accept-Encoding");
   if (acceptEncoding) {
     upstreamHeaders.set("Accept-Encoding", acceptEncoding);
   }
 
-  /* User-Agent: Pass through client's browser user agent, or fallback */
+  /* 4. User-Agent */
   const userAgent = request.headers.get("User-Agent");
-  if (userAgent) {
-    upstreamHeaders.set("User-Agent", userAgent);
-  } else {
-    upstreamHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-  }
+  upstreamHeaders.set(
+    "User-Agent", 
+    userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  );
 
+  /* 5. Browser Sec-Fetch metadata (helps bypass advanced WAF checks) */
+  upstreamHeaders.set("Sec-Fetch-Site", "cross-site");
+  upstreamHeaders.set("Sec-Fetch-Mode", "cors");
+  upstreamHeaders.set("Sec-Fetch-Dest", "empty");
   /* -------------------------------------------------------
      Fetch upstream
   ------------------------------------------------------- */
