@@ -1,24 +1,31 @@
 /**
- * Cloudflare Worker - CORS / Media Proxy
+ * Cloudflare Worker
+ * CORS / HLS / DASH Media Proxy
  *
- * Endpoint:
- *   /proxy?url=https://example.com/video.m3u8
+ * URL FORMAT:
  *
- * Examples:
- *   /proxy?url=https%3A%2F%2Fexample.com%2Fvideo.m3u8
- *   /proxy?url=https%3A%2F%2Fexample.com%2Fvideo.mpd
+ * /proxy/ENCODED_TARGET_URL
  *
- * Supported:
- *   - GET
- *   - HEAD
- *   - OPTIONS
- *   - CORS
- *   - HTTP Range requests
- *   - HLS .m3u8
- *   - DASH .mpd
- *   - TS / M4S / MP4 / AAC etc.
+ * Example:
  *
- * The proxy does NOT proxy DRM license requests.
+ * https://YOUR-WORKER.workers.dev/proxy/https%3A%2F%2Fexample.com%2Flive%2Fmaster.m3u8
+ *
+ * Supports:
+ * - GET
+ * - HEAD
+ * - OPTIONS
+ * - CORS
+ * - Range requests
+ * - HLS .m3u8
+ * - DASH .mpd
+ * - TS
+ * - M4S
+ * - MP4
+ * - AAC
+ * - Other media responses
+ *
+ * Use only with domains/streams you own or are authorized
+ * to proxy.
  */
 
 
@@ -27,17 +34,19 @@
 ========================================================= */
 
 /*
- * Add the domains that you own or are authorized to proxy.
+ * Add your authorized domains here.
  *
  * Example:
  *
  * const ALLOWED_HOSTS = [
- *   "example.com",
+ *   "livestream2.sunnxt.com",
+      "livestream.sunnxt.com",
+      "livestream1.sunnxt.com",
+      "livestream3.sunnxt.com",
  *   "cdn.example.com",
- *   "stream.example.net"
  * ];
  *
- * Subdomains are matched automatically.
+ * Subdomains are also accepted.
  */
 
 const ALLOWED_HOSTS = [
@@ -47,26 +56,28 @@ const ALLOWED_HOSTS = [
 
 
 /*
- * Set this to true only if you intentionally want the Worker
- * to proxy arbitrary HTTP/HTTPS URLs.
+ * Keep false for a controlled proxy.
  *
- * This is NOT recommended for a public Worker because it
- * creates an open proxy.
+ * If true, any HTTP/HTTPS hostname can be requested,
+ * creating an open proxy.
+ *
+ * Not recommended for a public Worker.
  */
+
 const ALLOW_ALL_HOSTS = false;
 
 
 /*
- * Proxy endpoint.
+ * Proxy path.
  */
-const PROXY_PATH = "/proxy";
+
+const PROXY_PATH = "/proxy/";
 
 
 /*
- * Maximum manifest size that the Worker will rewrite.
- *
- * HLS/DASH manifests are normally small.
+ * Maximum manifest size to process.
  */
+
 const MAX_MANIFEST_SIZE = 5 * 1024 * 1024;
 
 
@@ -76,99 +87,147 @@ const MAX_MANIFEST_SIZE = 5 * 1024 * 1024;
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+
+  "Access-Control-Allow-Methods":
+    "GET, HEAD, OPTIONS",
+
   "Access-Control-Allow-Headers":
     "Range, Origin, Accept, Content-Type, User-Agent",
+
   "Access-Control-Expose-Headers":
     "Accept-Ranges, Content-Length, Content-Range, Content-Type",
-  "Access-Control-Max-Age": "86400",
+
+  "Access-Control-Max-Age":
+    "86400",
 };
 
 
 /* =========================================================
-   MAIN WORKER
+   WORKER
 ========================================================= */
 
 export default {
-  async fetch(request) {
-    try {
-      const url = new URL(request.url);
 
-      /*
-       * CORS preflight
-       */
-      if (request.method === "OPTIONS") {
+  async fetch(request) {
+
+    try {
+
+      const workerUrl =
+        new URL(request.url);
+
+
+      /* -----------------------------------------------------
+         OPTIONS / CORS PREFLIGHT
+      ----------------------------------------------------- */
+
+      if (
+        request.method === "OPTIONS"
+      ) {
+
         return new Response(null, {
           status: 204,
           headers: CORS_HEADERS,
         });
+
       }
 
 
-      /*
-       * Only GET and HEAD are required for media playback.
-       */
+      /* -----------------------------------------------------
+         ONLY GET / HEAD
+      ----------------------------------------------------- */
+
       if (
         request.method !== "GET" &&
         request.method !== "HEAD"
       ) {
+
         return jsonResponse(
           {
-            error: "Method Not Allowed",
+            error:
+              "Method Not Allowed",
           },
           405
         );
+
       }
 
 
-      /*
-       * Root page.
-       */
-      if (url.pathname === "/" || url.pathname === "") {
+      /* -----------------------------------------------------
+         HOME PAGE
+      ----------------------------------------------------- */
+
+      if (
+        workerUrl.pathname === "/" ||
+        workerUrl.pathname === ""
+      ) {
+
         return new Response(
           getHomePage(),
           {
             status: 200,
+
             headers: {
               "Content-Type":
                 "text/html; charset=UTF-8",
+
               ...CORS_HEADERS,
             },
           }
         );
+
       }
 
 
-      /*
-       * Proxy request.
-       */
-      if (url.pathname === PROXY_PATH) {
-        return proxyRequest(request, url);
+      /* -----------------------------------------------------
+         PROXY
+      ----------------------------------------------------- */
+
+      if (
+        workerUrl.pathname.startsWith(
+          PROXY_PATH
+        )
+      ) {
+
+        return proxyRequest(
+          request,
+          workerUrl
+        );
+
       }
 
 
-      /*
-       * Unknown endpoint.
-       */
+      /* -----------------------------------------------------
+         NOT FOUND
+      ----------------------------------------------------- */
+
       return jsonResponse(
         {
           error: "Not Found",
+
           usage:
-            "/proxy?url=https://your-authorized-domain.com/stream.m3u8",
+            "/proxy/ENCODED_TARGET_URL",
         },
         404
       );
 
+
     } catch (error) {
+
       return jsonResponse(
         {
-          error: "Worker Error",
-          message: String(error),
+          error:
+            "Worker Error",
+
+          message:
+            String(error),
         },
         500
       );
+
     }
+
   },
+
 };
 
 
@@ -176,50 +235,132 @@ export default {
    PROXY REQUEST
 ========================================================= */
 
-async function proxyRequest(request, workerUrl) {
+async function proxyRequest(
+  request,
+  workerUrl
+) {
 
-  /*
-   * Get target URL.
-   */
-  const targetString =
-    workerUrl.searchParams.get("url");
 
-  if (!targetString) {
+  /* -------------------------------------------------------
+     EXTRACT ENCODED TARGET URL
+  ------------------------------------------------------- */
+
+  const pathname =
+    workerUrl.pathname;
+
+
+  if (
+    !pathname.startsWith(
+      PROXY_PATH
+    )
+  ) {
+
     return jsonResponse(
       {
-        error: "Missing url parameter",
-        example:
-          "/proxy?url=https://example.com/video.m3u8",
+        error:
+          "Invalid proxy path",
       },
       400
     );
+
   }
 
 
   /*
-   * Parse target URL.
+   * Everything after /proxy/
+   * is the encoded target URL.
+   *
+   * Example:
+   *
+   * /proxy/https%3A%2F%2Fexample.com%2Fvideo.m3u8
    */
+
+  const encodedTarget =
+    pathname.substring(
+      PROXY_PATH.length
+    );
+
+
+  if (!encodedTarget) {
+
+    return jsonResponse(
+      {
+        error:
+          "Missing target URL",
+
+        usage:
+          "/proxy/ENCODED_TARGET_URL",
+      },
+      400
+    );
+
+  }
+
+
+  /* -------------------------------------------------------
+     DECODE TARGET
+  ------------------------------------------------------- */
+
+  let targetString;
+
+  try {
+
+    targetString =
+      decodeURIComponent(
+        encodedTarget
+      );
+
+  } catch {
+
+    return jsonResponse(
+      {
+        error:
+          "Invalid encoded target URL",
+      },
+      400
+    );
+
+  }
+
+
+  /* -------------------------------------------------------
+     PARSE TARGET
+  ------------------------------------------------------- */
+
   let targetUrl;
 
   try {
-    targetUrl = new URL(targetString);
+
+    targetUrl =
+      new URL(
+        targetString
+      );
+
   } catch {
+
     return jsonResponse(
       {
-        error: "Invalid target URL",
+        error:
+          "Invalid target URL",
+
+        target:
+          targetString,
       },
       400
     );
+
   }
 
 
-  /*
-   * Only HTTP and HTTPS.
-   */
+  /* -------------------------------------------------------
+     ALLOW HTTP / HTTPS ONLY
+  ------------------------------------------------------- */
+
   if (
     targetUrl.protocol !== "https:" &&
     targetUrl.protocol !== "http:"
   ) {
+
     return jsonResponse(
       {
         error:
@@ -227,176 +368,272 @@ async function proxyRequest(request, workerUrl) {
       },
       400
     );
+
   }
 
 
-  /*
-   * Prevent local/private protocols.
-   */
+  /* -------------------------------------------------------
+     BLOCK LOCAL ADDRESSES
+  ------------------------------------------------------- */
+
+  const hostname =
+    targetUrl.hostname.toLowerCase();
+
+
   if (
-    targetUrl.hostname === "localhost" ||
-    targetUrl.hostname === "127.0.0.1" ||
-    targetUrl.hostname === "::1"
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "0.0.0.0"
   ) {
+
     return jsonResponse(
       {
-        error: "Local addresses are not allowed",
+        error:
+          "Local addresses are not allowed",
       },
       403
     );
+
   }
 
 
-  /*
-   * Check domain allowlist.
-   */
-  if (!isAllowedHost(targetUrl.hostname)) {
+  /* -------------------------------------------------------
+     DOMAIN ALLOWLIST
+  ------------------------------------------------------- */
+
+  if (
+    !isAllowedHost(
+      hostname
+    )
+  ) {
+
     return jsonResponse(
       {
-        error: "Target host is not allowed",
-        host: targetUrl.hostname,
+        error:
+          "Target host is not allowed",
+
+        host:
+          hostname,
+
+        message:
+          "Add this hostname to ALLOWED_HOSTS in worker.js",
       },
       403
     );
+
   }
 
 
-  /*
-   * Build upstream headers.
-   */
-  const upstreamHeaders = new Headers();
+  /* -------------------------------------------------------
+     UPSTREAM HEADERS
+  ------------------------------------------------------- */
+
+  const upstreamHeaders =
+    new Headers();
 
 
   /*
-   * Preserve Range requests.
+   * Range is important for:
    *
-   * This is important for:
-   *   MP4
-   *   M4S
-   *   DASH segments
-   *   video seeking
+   * MP4
+   * M4S
+   * DASH
+   * seeking
    */
+
   const range =
-    request.headers.get("Range");
+    request.headers.get(
+      "Range"
+    );
+
 
   if (range) {
-    upstreamHeaders.set("Range", range);
+
+    upstreamHeaders.set(
+      "Range",
+      range
+    );
+
   }
 
 
   /*
-   * Preserve Accept.
+   * Accept
    */
+
   const accept =
-    request.headers.get("Accept");
+    request.headers.get(
+      "Accept"
+    );
+
 
   if (accept) {
-    upstreamHeaders.set("Accept", accept);
+
+    upstreamHeaders.set(
+      "Accept",
+      accept
+    );
+
   }
 
 
   /*
-   * Preserve Accept-Encoding where appropriate.
+   * Accept-Encoding
    */
+
   const acceptEncoding =
-    request.headers.get("Accept-Encoding");
+    request.headers.get(
+      "Accept-Encoding"
+    );
+
 
   if (acceptEncoding) {
+
     upstreamHeaders.set(
       "Accept-Encoding",
       acceptEncoding
     );
+
   }
 
 
-  /*
-   * Do not forward browser Origin/Host/Cookie headers.
-   *
-   * This avoids accidentally leaking browser credentials
-   * to the upstream server.
-   */
-  const upstreamRequest = new Request(
-    targetUrl.toString(),
-    {
-      method: request.method,
-      headers: upstreamHeaders,
-      redirect: "follow",
-    }
-  );
+  /* -------------------------------------------------------
+     UPSTREAM REQUEST
+  ------------------------------------------------------- */
+
+  const upstreamRequest =
+    new Request(
+      targetUrl.toString(),
+      {
+        method:
+          request.method,
+
+        headers:
+          upstreamHeaders,
+
+        redirect:
+          "follow",
+      }
+    );
 
 
-  /*
-   * Fetch upstream.
-   */
+  /* -------------------------------------------------------
+     FETCH UPSTREAM
+  ------------------------------------------------------- */
+
   let response;
 
   try {
-    response = await fetch(
-      upstreamRequest
-    );
+
+    response =
+      await fetch(
+        upstreamRequest
+      );
+
   } catch (error) {
+
     return jsonResponse(
       {
-        error: "Upstream request failed",
-        message: String(error),
+        error:
+          "Upstream request failed",
+
+        message:
+          String(error),
       },
       502
     );
+
   }
 
 
-  /*
-   * Copy response headers.
-   */
+  /* -------------------------------------------------------
+     RESPONSE HEADERS
+  ------------------------------------------------------- */
+
   const responseHeaders =
     new Headers();
 
 
   /*
-   * Headers useful for media playback.
+   * Headers required/useful for
+   * media playback.
    */
+
   const headersToCopy = [
+
     "Content-Type",
+
     "Content-Length",
+
     "Content-Range",
+
     "Accept-Ranges",
+
     "Cache-Control",
+
     "ETag",
+
     "Last-Modified",
+
     "Expires",
+
     "Content-Encoding",
+
   ];
 
 
-  for (const header of headersToCopy) {
-    const value =
-      response.headers.get(header);
+  for (
+    const header
+    of headersToCopy
+  ) {
 
-    if (value !== null) {
+    const value =
+      response.headers.get(
+        header
+      );
+
+
+    if (
+      value !== null
+    ) {
+
       responseHeaders.set(
         header,
         value
       );
+
     }
+
   }
 
 
-  /*
-   * Add CORS.
-   */
-  for (const [key, value] of Object.entries(
-    CORS_HEADERS
-  )) {
+  /* -------------------------------------------------------
+     CORS
+  ------------------------------------------------------- */
+
+  for (
+    const [
+      key,
+      value
+    ]
+    of Object.entries(
+      CORS_HEADERS
+    )
+  ) {
+
     responseHeaders.set(
       key,
       value
     );
+
   }
 
 
-  /*
-   * Detect content type.
-   */
+  /* -------------------------------------------------------
+     DETECT CONTENT TYPE
+  ------------------------------------------------------- */
+
   const contentType =
     (
       response.headers.get(
@@ -405,59 +642,85 @@ async function proxyRequest(request, workerUrl) {
     ).toLowerCase();
 
 
-  const pathname =
+  const targetPath =
     targetUrl.pathname.toLowerCase();
 
 
+  /* -------------------------------------------------------
+     HLS
+  ------------------------------------------------------- */
+
   const isHls =
+
     contentType.includes(
       "application/vnd.apple.mpegurl"
     ) ||
+
     contentType.includes(
       "application/x-mpegurl"
     ) ||
-    pathname.endsWith(".m3u8");
 
+    contentType.includes(
+      "audio/mpegurl"
+    ) ||
+
+    targetPath.endsWith(
+      ".m3u8"
+    );
+
+
+  /* -------------------------------------------------------
+     DASH
+  ------------------------------------------------------- */
 
   const isDash =
+
     contentType.includes(
       "application/dash+xml"
     ) ||
-    pathname.endsWith(".mpd");
+
+    targetPath.endsWith(
+      ".mpd"
+    );
 
 
-  /*
-   * Rewrite HLS/DASH manifests.
-   *
-   * This is necessary because a manifest can contain
-   * relative URLs pointing directly to the upstream CDN.
-   */
+  /* -------------------------------------------------------
+     MANIFEST REWRITE
+  ------------------------------------------------------- */
+
   if (
     (isHls || isDash) &&
     request.method === "GET"
   ) {
+
     return rewriteManifest(
       response,
       targetUrl,
       workerUrl,
       isHls
     );
+
   }
 
 
-  /*
-   * Normal media response.
-   *
-   * The body is streamed directly through Cloudflare.
-   */
+  /* -------------------------------------------------------
+     NORMAL MEDIA RESPONSE
+  ------------------------------------------------------- */
+
   return new Response(
     response.body,
     {
-      status: response.status,
-      statusText: response.statusText,
-      headers: responseHeaders,
+      status:
+        response.status,
+
+      statusText:
+        response.statusText,
+
+      headers:
+        responseHeaders,
     }
   );
+
 }
 
 
@@ -472,9 +735,11 @@ async function rewriteManifest(
   isHls
 ) {
 
-  /*
-   * Read manifest.
-   */
+
+  /* -------------------------------------------------------
+     CHECK CONTENT LENGTH
+  ------------------------------------------------------- */
+
   const contentLength =
     Number(
       response.headers.get(
@@ -483,59 +748,93 @@ async function rewriteManifest(
     );
 
 
-  /*
-   * Avoid processing unexpectedly large files.
-   */
   if (
-    contentLength > MAX_MANIFEST_SIZE
+    contentLength >
+    MAX_MANIFEST_SIZE
   ) {
+
+    const headers = {
+
+      "Content-Type":
+        response.headers.get(
+          "Content-Type"
+        ) ||
+        (
+          isHls
+            ? "application/vnd.apple.mpegurl"
+            : "application/dash+xml"
+        ),
+
+      ...CORS_HEADERS,
+
+    };
+
+
     return new Response(
       response.body,
       {
-        status: response.status,
-        statusText: response.statusText,
-        headers: {
-          ...Object.fromEntries(
-            response.headers
-          ),
-          ...CORS_HEADERS,
-        },
+        status:
+          response.status,
+
+        statusText:
+          response.statusText,
+
+        headers,
       }
     );
+
   }
 
+
+  /* -------------------------------------------------------
+     READ MANIFEST
+  ------------------------------------------------------- */
 
   let text;
 
   try {
-    text = await response.text();
+
+    text =
+      await response.text();
+
   } catch {
+
     return new Response(
       "Unable to read manifest",
       {
         status: 502,
+
         headers: {
+
           "Content-Type":
             "text/plain; charset=UTF-8",
+
           ...CORS_HEADERS,
+
         },
       }
     );
+
   }
 
 
-  /*
-   * Protect against very large manifests even when
-   * Content-Length was not supplied.
-   */
+  /* -------------------------------------------------------
+     SIZE PROTECTION
+  ------------------------------------------------------- */
+
   if (
-    text.length > MAX_MANIFEST_SIZE
+    text.length >
+    MAX_MANIFEST_SIZE
   ) {
+
     return new Response(
       text,
       {
-        status: response.status,
+        status:
+          response.status,
+
         headers: {
+
           "Content-Type":
             response.headers.get(
               "Content-Type"
@@ -545,31 +844,47 @@ async function rewriteManifest(
                 ? "application/vnd.apple.mpegurl"
                 : "application/dash+xml"
             ),
+
           ...CORS_HEADERS,
+
         },
       }
     );
+
   }
 
 
+  /* -------------------------------------------------------
+     REWRITE
+  ------------------------------------------------------- */
+
   let rewritten;
 
+
   if (isHls) {
+
     rewritten =
       rewriteHlsManifest(
         text,
         targetUrl,
         workerUrl
       );
+
   } else {
+
     rewritten =
       rewriteDashManifest(
         text,
         targetUrl,
         workerUrl
       );
+
   }
 
+
+  /* -------------------------------------------------------
+     RESPONSE
+  ------------------------------------------------------- */
 
   const outputType =
     response.headers.get(
@@ -583,28 +898,38 @@ async function rewriteManifest(
 
 
   const headers = {
-    "Content-Type": outputType,
+
+    "Content-Type":
+      outputType,
+
+    "Cache-Control":
+      response.headers.get(
+        "Cache-Control"
+      ) ||
+      "no-cache",
+
     ...CORS_HEADERS,
+
   };
 
 
   /*
-   * Do not retain the original Content-Length because
-   * the manifest size changed after rewriting.
+   * Do not copy original Content-Length.
+   *
+   * The manifest changed after rewriting.
    */
-  headers["Cache-Control"] =
-    response.headers.get(
-      "Cache-Control"
-    ) || "no-cache";
 
 
   return new Response(
     rewritten,
     {
-      status: response.status,
+      status:
+        response.status,
+
       headers,
     }
   );
+
 }
 
 
@@ -618,87 +943,129 @@ function rewriteHlsManifest(
   workerUrl
 ) {
 
-  /*
-   * Rewrite URI="..." attributes.
-   *
-   * Used by:
-   *
-   * #EXT-X-KEY
-   * #EXT-X-MAP
-   * #EXT-X-MEDIA
-   * etc.
-   */
-  text = text.replace(
-    /URI="([^"]+)"/gi,
-    (match, uri) => {
 
-      /*
-       * Do not modify data URLs.
-       */
-      if (
-        uri.startsWith("data:")
-      ) {
-        return match;
-      }
+  /* -------------------------------------------------------
+     URI="..."
+     
+     Handles:
+     
+     #EXT-X-KEY
+     #EXT-X-MAP
+     #EXT-X-MEDIA
+     #EXT-X-I-FRAME-STREAM-INF
+  ------------------------------------------------------- */
+
+  text =
+    text.replace(
+      /URI="([^"]+)"/gi,
+      (match, uri) => {
+
+        if (
+          uri.startsWith(
+            "data:"
+          )
+        ) {
+
+          return match;
+
+        }
 
 
-      const absolute =
-        resolveUrl(
-          uri,
-          baseUrl
+        const absolute =
+          resolveUrl(
+            uri,
+            baseUrl
+          );
+
+
+        if (!absolute) {
+
+          return match;
+
+        }
+
+
+        return (
+          'URI="' +
+          makeProxyUrl(
+            absolute,
+            workerUrl
+          ) +
+          '"'
         );
 
-
-      if (!absolute) {
-        return match;
       }
+    );
 
 
-      return `URI="${makeProxyUrl(
-        absolute,
-        workerUrl
-      )}"`;
-    }
-  );
+  /* -------------------------------------------------------
+     NORMAL HLS URL LINES
+     
+     Example:
+     
+     segment.ts
+     video/segment.m4s
+     https://cdn.example.com/video.ts
+  ------------------------------------------------------- */
 
-
-  /*
-   * Rewrite ordinary HLS URI lines.
-   *
-   * Examples:
-   *
-   * segment.ts
-   * video/segment1.m4s
-   * https://cdn.example.com/a.ts
-   */
   const lines =
-    text.split(/\r?\n/);
+    text.split(
+      /\r?\n/
+    );
 
 
   const output = [];
 
 
-  for (const line of lines) {
+  for (
+    const line
+    of lines
+  ) {
 
     const trimmed =
       line.trim();
 
 
     /*
-     * Comments/tags remain unchanged.
+     * Empty lines.
      */
+
     if (
-      trimmed === "" ||
-      trimmed.startsWith("#")
+      trimmed === ""
     ) {
-      output.push(line);
+
+      output.push(
+        line
+      );
+
       continue;
+
     }
 
 
     /*
-     * Resolve media URI.
+     * HLS tags.
      */
+
+    if (
+      trimmed.startsWith(
+        "#"
+      )
+    ) {
+
+      output.push(
+        line
+      );
+
+      continue;
+
+    }
+
+
+    /*
+     * Resolve media URL.
+     */
+
     const absolute =
       resolveUrl(
         trimmed,
@@ -707,10 +1074,19 @@ function rewriteHlsManifest(
 
 
     if (!absolute) {
-      output.push(line);
+
+      output.push(
+        line
+      );
+
       continue;
+
     }
 
+
+    /*
+     * Replace with proxy URL.
+     */
 
     output.push(
       makeProxyUrl(
@@ -718,10 +1094,14 @@ function rewriteHlsManifest(
         workerUrl
       )
     );
+
   }
 
 
-  return output.join("\n");
+  return output.join(
+    "\n"
+  );
+
 }
 
 
@@ -735,93 +1115,100 @@ function rewriteDashManifest(
   workerUrl
 ) {
 
-  /*
-   * Rewrite XML attributes containing URLs.
-   *
-   * Handles common DASH attributes:
-   *
-   * media=""
-   * initialization=""
-   * sourceURL=""
-   * index=""
-   */
-  text = text.replace(
-    /(\b(?:media|initialization|sourceURL|index)=")([^"]+)(")/gi,
-    (match, prefix, value, suffix) => {
 
-      /*
-       * Template URLs may contain:
-       *
-       * $Number$
-       * $RepresentationID$
-       *
-       * These are still valid URL templates.
-       */
-      const absolute =
-        resolveUrl(
-          value,
-          baseUrl
+  /* -------------------------------------------------------
+     MEDIA / INITIALIZATION / SOURCEURL / INDEX
+  ------------------------------------------------------- */
+
+  text =
+    text.replace(
+      /(\b(?:media|initialization|sourceURL|index)=")([^"]+)(")/gi,
+      (
+        match,
+        prefix,
+        value,
+        suffix
+      ) => {
+
+        const absolute =
+          resolveUrl(
+            value,
+            baseUrl
+          );
+
+
+        if (!absolute) {
+
+          return match;
+
+        }
+
+
+        return (
+          prefix +
+          makeProxyUrl(
+            absolute,
+            workerUrl
+          ) +
+          suffix
         );
 
-
-      if (!absolute) {
-        return match;
       }
+    );
 
 
-      return (
-        prefix +
-        makeProxyUrl(
-          absolute,
-          workerUrl
-        ) +
+  /* -------------------------------------------------------
+     BASEURL
+  ------------------------------------------------------- */
+
+  text =
+    text.replace(
+      /(<BaseURL[^>]*>)([^<]+)(<\/BaseURL>)/gi,
+      (
+        match,
+        prefix,
+        value,
         suffix
-      );
-    }
-  );
+      ) => {
+
+        const cleanValue =
+          value.trim();
 
 
-  /*
-   * Rewrite <BaseURL>...</BaseURL>.
-   *
-   * This is important for DASH manifests that use:
-   *
-   * <BaseURL>https://cdn.example.com/video/</BaseURL>
-   */
-  text = text.replace(
-    /(<BaseURL[^>]*>)([^<]+)(<\/BaseURL>)/gi,
-    (match, prefix, value, suffix) => {
+        const absolute =
+          resolveUrl(
+            cleanValue,
+            baseUrl
+          );
 
-      const absolute =
-        resolveUrl(
-          value.trim(),
-          baseUrl
+
+        if (!absolute) {
+
+          return match;
+
+        }
+
+
+        return (
+          prefix +
+          makeProxyUrl(
+            absolute,
+            workerUrl
+          ) +
+          suffix
         );
 
-
-      if (!absolute) {
-        return match;
       }
-
-
-      return (
-        prefix +
-        makeProxyUrl(
-          absolute,
-          workerUrl
-        ) +
-        suffix
-      );
-    }
-  );
+    );
 
 
   return text;
+
 }
 
 
 /* =========================================================
-   URL HELPERS
+   RESOLVE URL
 ========================================================= */
 
 function resolveUrl(
@@ -832,8 +1219,9 @@ function resolveUrl(
   try {
 
     /*
-     * Ignore unsupported schemes.
+     * Ignore data/blob URLs.
      */
+
     if (
       value.startsWith(
         "data:"
@@ -842,69 +1230,94 @@ function resolveUrl(
         "blob:"
       )
     ) {
+
       return null;
+
     }
 
+
+    /*
+     * DASH templates are supported.
+     *
+     * Example:
+     *
+     * video-$Number$.m4s
+     */
 
     return new URL(
       value,
       baseUrl
     ).toString();
 
+
   } catch {
+
     return null;
+
   }
+
 }
 
 
-/*
- * Build Worker proxy URL.
- */
+/* =========================================================
+   MAKE PROXY URL
+========================================================= */
+
 function makeProxyUrl(
   target,
   workerUrl
 ) {
 
-  const proxy =
-    new URL(
-      PROXY_PATH,
-      workerUrl.origin
-    );
+  /*
+   * IMPORTANT:
+   *
+   * The entire target URL is encoded once.
+   *
+   * Result:
+   *
+   * /proxy/https%3A%2F%2Fexample.com%2Fvideo.m3u8
+   */
 
-
-  proxy.searchParams.set(
-    "url",
-    target
+  return (
+    workerUrl.origin +
+    PROXY_PATH +
+    encodeURIComponent(
+      target
+    )
   );
 
-
-  return proxy.toString();
 }
 
 
 /* =========================================================
-   DOMAIN ALLOWLIST
+   ALLOWED HOSTS
 ========================================================= */
 
 function isAllowedHost(
   hostname
 ) {
 
+
   /*
-   * Explicitly enabled open proxy.
+   * Optional open-proxy mode.
+   *
+   * Keep false.
    */
-  if (ALLOW_ALL_HOSTS) {
+
+  if (
+    ALLOW_ALL_HOSTS
+  ) {
+
     return true;
+
   }
 
 
   const host =
-    hostname.toLowerCase();
+    hostname
+      .toLowerCase();
 
 
-  /*
-   * Exact or subdomain match.
-   */
   return ALLOWED_HOSTS.some(
     allowed => {
 
@@ -917,14 +1330,30 @@ function isAllowedHost(
           );
 
 
-      return (
-        host === domain ||
-        host.endsWith(
-          "." + domain
-        )
+      /*
+       * Exact hostname.
+       */
+
+      if (
+        host === domain
+      ) {
+
+        return true;
+
+      }
+
+
+      /*
+       * Subdomain.
+       */
+
+      return host.endsWith(
+        "." + domain
       );
+
     }
   );
+
 }
 
 
@@ -945,13 +1374,18 @@ function jsonResponse(
     ),
     {
       status,
+
       headers: {
+
         "Content-Type":
           "application/json; charset=UTF-8",
+
         ...CORS_HEADERS,
+
       },
     }
   );
+
 }
 
 
@@ -962,79 +1396,150 @@ function jsonResponse(
 function getHomePage() {
 
   return `<!DOCTYPE html>
+
 <html>
+
 <head>
+
 <meta charset="UTF-8">
-<meta name="viewport"
-      content="width=device-width,initial-scale=1">
-<title>Media CORS Proxy</title>
+
+<meta
+  name="viewport"
+  content="width=device-width,initial-scale=1"
+>
+
+<title>
+Media CORS Proxy
+</title>
 
 <style>
 
 body {
-  font-family: Arial, sans-serif;
-  max-width: 900px;
-  margin: 40px auto;
-  padding: 20px;
-  line-height: 1.5;
+
+  font-family:
+    Arial,
+    sans-serif;
+
+  max-width:
+    900px;
+
+  margin:
+    40px auto;
+
+  padding:
+    20px;
+
+  line-height:
+    1.5;
+
 }
 
 h1 {
-  margin-bottom: 10px;
+
+  margin-bottom:
+    10px;
+
 }
 
 input {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 12px;
-  font-size: 15px;
-  margin: 10px 0;
+
+  width:
+    100%;
+
+  box-sizing:
+    border-box;
+
+  padding:
+    12px;
+
+  font-size:
+    15px;
+
+  margin:
+    10px 0;
+
 }
 
 button {
-  padding: 12px 20px;
-  font-size: 15px;
-  cursor: pointer;
+
+  padding:
+    12px 20px;
+
+  font-size:
+    15px;
+
+  cursor:
+    pointer;
+
 }
 
 pre {
-  background: #f4f4f4;
-  padding: 15px;
-  border-radius: 8px;
-  overflow-wrap: anywhere;
+
+  background:
+    #f4f4f4;
+
+  padding:
+    15px;
+
+  border-radius:
+    8px;
+
+  overflow-wrap:
+    anywhere;
+
 }
 
 .note {
-  padding: 12px;
-  background: #fff3cd;
-  border-radius: 8px;
+
+  margin-top:
+    20px;
+
+  padding:
+    12px;
+
+  background:
+    #fff3cd;
+
+  border-radius:
+    8px;
+
 }
 
 </style>
+
 </head>
 
 <body>
 
-<h1>Media CORS Proxy</h1>
+<h1>
+Media CORS Proxy
+</h1>
 
 <p>
-Authorized media URL:
+Enter an authorized media URL:
 </p>
 
 <input
   id="source"
-  placeholder="https://your-domain.com/video.m3u8"
+  placeholder="https://example.com/live/master.m3u8"
 >
 
-<button onclick="generate()">
+<button
+  onclick="generate()"
+>
 Generate Proxy URL
 </button>
 
-<pre id="result">Waiting...</pre>
+<pre id="result">
+Waiting...
+</pre>
 
 <div class="note">
-Use this proxy only with media servers and URLs that
-you own or are authorized to proxy.
+
+Use this proxy only with media servers
+and URLs that you own or are authorized
+to proxy.
+
 </div>
 
 <script>
@@ -1042,36 +1547,54 @@ you own or are authorized to proxy.
 function generate() {
 
   const source =
-    document.getElementById("source").value.trim();
+    document
+      .getElementById("source")
+      .value
+      .trim();
+
 
   const result =
-    document.getElementById("result");
+    document
+      .getElementById("result");
+
 
   if (!source) {
+
     result.textContent =
       "Please enter a URL.";
+
     return;
+
   }
+
 
   try {
 
     const proxy =
       window.location.origin +
-      "/proxy?url=" +
-      encodeURIComponent(source);
+      "/proxy/" +
+      encodeURIComponent(
+        source
+      );
 
-    result.textContent = proxy;
 
-  } catch (e) {
+    result.textContent =
+      proxy;
+
+
+  } catch (error) {
 
     result.textContent =
       "Invalid URL.";
 
   }
+
 }
 
 </script>
 
 </body>
+
 </html>`;
+
 }
